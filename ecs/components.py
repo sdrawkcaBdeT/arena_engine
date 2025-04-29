@@ -1,10 +1,11 @@
+"""Type-safe component store (stdlib-only)."""
 from __future__ import annotations
-from typing import TypeVar, Dict, Generic
+from typing import TypeVar, Generic, Dict, Iterator, Tuple
 
 T = TypeVar("T")
 
-
 class ComponentStore(Generic[T]):
+    """Maps ``EntityID`` → component instance of type *T*."""
     __slots__ = ("_data",)
 
     def __init__(self) -> None:
@@ -19,5 +20,5 @@ class ComponentStore(Generic[T]):
     def remove(self, eid: int) -> None:
         self._data.pop(eid, None)
 
-    def items(self):
+    def items(self) -> Iterator[Tuple[int, T]]:
         return self._data.items()

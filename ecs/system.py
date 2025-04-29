@@ -1,29 +1,33 @@
 from __future__ import annotations
 import bisect
-from typing import Protocol, List, Callable, runtime_checkable
+from typing import Protocol, runtime_checkable, List, Callable, TYPE_CHECKING
 
+if TYPE_CHECKING:  # avoid circular import at runtime
+    from .world import World
 
 @runtime_checkable
 class System(Protocol):
-    priority: int = 0
+    """Callable chunk of game logic executed each fixed tick."""
+    priority: int  # default 0 → executes earlier when lower
 
-    def __call__(self, world, rng, tick: int, dt_ns: int): ...
-
+    def __call__(self, world: "World", dt_ns: int) -> None: ...
 
 class SystemRegistry:
+    """Keeps systems sorted by ``priority`` for deterministic iteration."""
     __slots__ = ("_systems",)
 
     def __init__(self) -> None:
-        self._systems: List[Callable] = []
+        self._systems: List[Callable[["World", int], None]] = []
 
     def register(self, system: System) -> None:
-        keys = [s.priority for s in self._systems]
-        pos = bisect.bisect(keys, system.priority)
-        self._systems.insert(pos, system)
+        pr = getattr(system, "priority", 0)
+        idx = bisect.bisect([getattr(s, "priority", 0) for s in self._systems], pr)
+        self._systems.insert(idx, system)
 
     @property
-    def systems(self) -> List[Callable]:
-        return self._systems.copy()
+    def systems(self) -> tuple[Callable[["World", int], None], ...]:
+        """Immutable tuple prevents runtime re-ordering."""
+        return tuple(self._systems)
 
-
+# Global registry singleton (optional convenience)
 registry = SystemRegistry()

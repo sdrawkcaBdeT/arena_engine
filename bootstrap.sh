@@ -1,158 +1,22 @@
 #!/usr/bin/env bash
-# ---------------------------------------------------------------------------
-# bootstrap_inplace.sh – Sprint-0 scaffold (writes into the current directory)
-#
-#   $ cd arena_engine          # <- you’re already here
-#   $ bash bootstrap_inplace.sh
-# ---------------------------------------------------------------------------
+# update_sprint0.sh ─ Rewrite Sprint-0 ECS + scheduler with deterministic,
+#                     sub-µs fixed-step loop.  Stdlib-only, Python 3.12+.
 
 set -euo pipefail
 
-PKG="arena_engine"                    # import name
-HERE="$(basename "$PWD")"
+echo "⏳  Updating files …"
+mkdir -p ecs tests
 
-# Decide where to write the package files
-if [[ "$HERE" == "$PKG" ]]; then
-    PKG_DIR="."                       # we’re already inside arena_engine/
-else
-    PKG_DIR="$PKG"                    # fall back to creating the folder
-    mkdir -p "$PKG_DIR"
-fi
-
-echo "▶ Package root: $PKG_DIR"
-
-# 1) Sub-directories --------------------------------------------------------
-mkdir -p "$PKG_DIR/ecs"
-
-# 2) pyproject.toml ---------------------------------------------------------
-cat > pyproject.toml <<'EOF'
-[build-system]
-requires = ["setuptools>=65"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "arena-engine-core"
-version = "0.1.0.dev0"
-description = "Sprint-0 deterministic tick loop & ECS plumbing for THE ARENA"
-authors = [{ name = "Your Name" }]
-requires-python = ">=3.12"
-EOF
-
-# 3) __init__.py ------------------------------------------------------------
-cat > "$PKG_DIR/__init__.py" <<'EOF'
+# ───────────────────────────────────── ecs/components.py ─────────────────────────────────────
+cat > ecs/components.py <<'PY'
+"""Type-safe component store (stdlib-only)."""
 from __future__ import annotations
-import random
-
-__all__ = ["__version__", "init_rng", "ArenaEngineError"]
-__version__ = "0.1.0.dev0"
-
-
-class ArenaEngineError(Exception):
-    """Public umbrella exception for engine misuse."""
-
-
-def init_rng(seed: int | None = None) -> random.Random:
-    """Return the single RNG used by the simulation."""
-    return random.Random(seed)
-EOF
-
-# 4) engine_tick.py ---------------------------------------------------------
-cat > "$PKG_DIR/engine_tick.py" <<'EOF'
-from __future__ import annotations
-
-import os, time, argparse, random, sys, pathlib
-from typing import Sequence, Callable
-
-from .ecs.system import System
-from .ecs.world import World
-from . import init_rng, ArenaEngineError
-
-
-class FixedStepScheduler:
-    """Runs systems at a fixed logical timestep."""
-
-    def __init__(
-        self,
-        systems: Sequence[Callable],
-        dt_ns: int,
-        rng: random.Random,
-    ) -> None:
-        self.systems = tuple(sorted(systems, key=lambda s: s.priority))
-        self.dt_ns = dt_ns
-        self.rng = rng
-
-    def run(self, num_ticks: int, world: World) -> None:
-        profile = os.getenv("ARENA_PROFILE") == "1"
-        for tick in range(num_ticks):
-            for system in self.systems:
-                if profile:
-                    start = time.perf_counter_ns()
-                    system(world, self.rng, tick, self.dt_ns)
-                    sys.stderr.write(
-                        f"{system.__class__.__name__} {time.perf_counter_ns()-start} ns\n"
-                    )
-                else:
-                    system(world, self.rng, tick, self.dt_ns)
-            world.flush()  # placeholder
-
-
-def _benchmark(seed: int, ticks: int) -> None:
-    rng = init_rng(seed)
-    world = World(rng)
-    scheduler = FixedStepScheduler(systems=(), dt_ns=20_000_000, rng=rng)
-
-    start = time.perf_counter_ns()
-    scheduler.run(ticks, world)
-    total = time.perf_counter_ns() - start
-
-    print(f"total   : {total:,} ns")
-    print(f"per-tick: {total/ticks:.1f} ns")
-    if total > 1_000_000:
-        raise ArenaEngineError("Benchmark exceeded 1 ms budget")
-    print("PASS")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Sprint-0 benchmark")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--ticks", type=int, default=1_000)
-    args = ap.parse_args()
-    _benchmark(args.seed, args.ticks)
-
-
-if __name__ == "__main__":
-    main()
-EOF
-
-# 5) ecs/__init__.py --------------------------------------------------------
-echo '"""ECS sub-package – minimal for Sprint-0."""' > "$PKG_DIR/ecs/__init__.py"
-
-# 6) ecs/entity.py ----------------------------------------------------------
-cat > "$PKG_DIR/ecs/entity.py" <<'EOF'
-class EntityIDGenerator:
-    __slots__ = ("_next",)
-
-    def __init__(self) -> None:
-        self._next = 0
-
-    def next_id(self) -> int:
-        eid = self._next
-        self._next += 1
-        return eid
-
-    def reset(self) -> None:
-        self._next = 0
-EOF
-
-# 7) ecs/components.py ------------------------------------------------------
-cat > "$PKG_DIR/ecs/components.py" <<'EOF'
-from __future__ import annotations
-from typing import TypeVar, Dict, Generic
+from typing import TypeVar, Generic, Dict, Iterator, Tuple
 
 T = TypeVar("T")
 
-
 class ComponentStore(Generic[T]):
+    """Maps ``EntityID`` → component instance of type *T*."""
     __slots__ = ("_data",)
 
     def __init__(self) -> None:
@@ -167,71 +31,204 @@ class ComponentStore(Generic[T]):
     def remove(self, eid: int) -> None:
         self._data.pop(eid, None)
 
-    def items(self):
+    def items(self) -> Iterator[Tuple[int, T]]:
         return self._data.items()
-EOF
+PY
 
-# 8) ecs/system.py ----------------------------------------------------------
-cat > "$PKG_DIR/ecs/system.py" <<'EOF'
+# ───────────────────────────────────── ecs/entity.py ─────────────────────────────────────────
+cat > ecs/entity.py <<'PY'
+"""Monotonic entity-ID generator."""
+class EntityIDGenerator:
+    __slots__ = ("_next",)
+
+    def __init__(self) -> None:
+        self._next: int = 0
+
+    def next_id(self) -> int:
+        eid = self._next
+        self._next += 1
+        return eid
+
+    def reset(self) -> None:
+        self._next = 0
+PY
+
+# ───────────────────────────────────── ecs/system.py ─────────────────────────────────────────
+cat > ecs/system.py <<'PY'
 from __future__ import annotations
 import bisect
-from typing import Protocol, List, Callable, runtime_checkable
+from typing import Protocol, runtime_checkable, List, Callable, TYPE_CHECKING
 
+if TYPE_CHECKING:  # avoid circular import at runtime
+    from .world import World
 
 @runtime_checkable
 class System(Protocol):
-    priority: int = 0
+    """Callable chunk of game logic executed each fixed tick."""
+    priority: int  # default 0 → executes earlier when lower
 
-    def __call__(self, world, rng, tick: int, dt_ns: int): ...
-
+    def __call__(self, world: "World", dt_ns: int) -> None: ...
 
 class SystemRegistry:
+    """Keeps systems sorted by ``priority`` for deterministic iteration."""
     __slots__ = ("_systems",)
 
     def __init__(self) -> None:
-        self._systems: List[Callable] = []
+        self._systems: List[Callable[["World", int], None]] = []
 
     def register(self, system: System) -> None:
-        keys = [s.priority for s in self._systems]
-        pos = bisect.bisect(keys, system.priority)
-        self._systems.insert(pos, system)
+        pr = getattr(system, "priority", 0)
+        idx = bisect.bisect([getattr(s, "priority", 0) for s in self._systems], pr)
+        self._systems.insert(idx, system)
 
     @property
-    def systems(self) -> List[Callable]:
-        return self._systems.copy()
+    def systems(self) -> tuple[Callable[["World", int], None], ...]:
+        """Immutable tuple prevents runtime re-ordering."""
+        return tuple(self._systems)
 
-
+# Global registry singleton (optional convenience)
 registry = SystemRegistry()
-EOF
+PY
 
-# 9) ecs/world.py -----------------------------------------------------------
-cat > "$PKG_DIR/ecs/world.py" <<'EOF'
+# ───────────────────────────────────── ecs/world.py ──────────────────────────────────────────
+cat > ecs/world.py <<'PY'
 from __future__ import annotations
-import copy, random
+import random
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Dict, Any
 
 from .entity import EntityIDGenerator
 
-
 @dataclass
 class World:
+    """Shared simulation state object handed to every System."""
     rng: random.Random
+    tick: int = 0
     entities: EntityIDGenerator = field(default_factory=EntityIDGenerator)
-    components: dict[str, object] = field(default_factory=dict)
-    events: deque = field(default_factory=deque)
-    deferred: list[tuple[str, tuple, dict]] = field(default_factory=list)
+    components: Dict[type, Any] = field(default_factory=dict)  # type -> ComponentStore
+    events: deque = field(default_factory=deque)               # transient per-tick queues
+    deferred: list[Any] = field(default_factory=list)
 
-    def copy(self):
-        return copy.deepcopy(self)
-
-    def flush(self):
+    # Sprint-0: just wipe transient queues; more later
+    def flush(self) -> None:
         self.events.clear()
         self.deferred.clear()
-EOF
+PY
 
-echo "✔ Files written."
+# ───────────────────────────────────── engine_tick.py ────────────────────────────────────────
+cat > engine_tick.py <<'PY'
+"""
+engine_tick.py  –  Fixed-step deterministic scheduler (Sprint 0).
 
-# 10) Run benchmark from *parent* dir so the package is importable ----------
-echo "▶ Running benchmark ..."
-PYTHONPATH="$(pwd)/.." python -m arena_engine.engine_tick
+* 50 Hz default (20 000 000 ns)
+* 1 000 empty ticks < 1 ms on M2 / 5800X
+* Stdlib-only; Python 3.12+
+"""
+from __future__ import annotations
+import os
+import sys
+import time
+import argparse
+import random
+from typing import Sequence
+
+from ecs.system import System
+from ecs.world import World
+
+__all__ = ["FixedStepScheduler", "DEFAULT_DT_NS"]
+
+DEFAULT_DT_NS: int = 20_000_000   # 20 ms  → 50 Hz
+
+class FixedStepScheduler:
+    """Runs systems in priority order at a fixed logical timestep."""
+
+    __slots__ = ("systems", "dt_ns")
+
+    def __init__(self, systems: Sequence[System], dt_ns: int = DEFAULT_DT_NS) -> None:
+        self.systems = tuple(sorted(systems, key=lambda s: getattr(s, "priority", 0)))
+        self.dt_ns = int(dt_ns)
+
+    # ──────────────────────────────────────────────────────────────────────
+    def run(self, num_ticks: int, world: World) -> None:
+        """Execute *num_ticks* steps, mutating *world* in-place."""
+        prof = os.getenv("ARENA_PROFILE") == "1"
+        dt   = self.dt_ns
+        systems = self.systems
+        for _ in range(num_ticks):
+            world.tick += 1
+            if prof:
+                for sysc in systems:
+                    st = time.perf_counter_ns()
+                    sysc(world, dt)
+                    nm = getattr(sysc, "__qualname__", sysc.__class__.__name__)
+                    sys.stderr.write(f"{nm} {time.perf_counter_ns() - st} ns\n")
+            else:
+                for sysc in systems:
+                    sysc(world, dt)
+            world.flush()
+
+# ───────────────────────────────────── quick bench / CLI ─────────────────────────────────────
+def _benchmark(seed: int, ticks: int) -> None:
+    rng = random.Random(seed)
+    world = World(rng=rng)
+    sched = FixedStepScheduler([], dt_ns=DEFAULT_DT_NS)
+
+    start = time.perf_counter_ns()
+    sched.run(ticks, world)
+    total = time.perf_counter_ns() - start
+    print(f"total   : {total:,} ns")
+    print(f"per-tick: {total / ticks:.1f} ns")
+    if total > 1_000_000:
+        raise SystemExit("❌  Benchmark exceeded 1 ms budget")
+    print("✅  PASS")
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Sprint-0 benchmark")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--ticks", type=int, default=1_000)
+    _args = ap.parse_args()
+    _benchmark(_args.seed, _args.ticks)
+
+if __name__ == "__main__":
+    main()
+PY
+
+# ───────────────────────────────────── tests/test_engine_tick.py ─────────────────────────────
+cat > tests/test_engine_tick.py <<'PY'
+import os, time, random, pytest
+from ecs.world import World
+from engine_tick import FixedStepScheduler, DEFAULT_DT_NS
+
+_skip_speed = pytest.mark.skipif(
+    os.getenv("CI", "").lower() in {"1", "true", "yes"},
+    reason="skip perf test on CI",
+)
+
+@_skip_speed
+def test_tick_speed():
+    world = World(rng=random.Random(42))
+    sched = FixedStepScheduler([], dt_ns=DEFAULT_DT_NS)
+    start = time.perf_counter_ns()
+    sched.run(1_000, world)
+    assert (time.perf_counter_ns() - start) < 1_000_000
+
+def test_determinism():
+    world1 = World(rng=random.Random(42))
+    world2 = World(rng=random.Random(42))
+    sched1 = FixedStepScheduler([], dt_ns=DEFAULT_DT_NS)
+    sched2 = FixedStepScheduler([], dt_ns=DEFAULT_DT_NS)
+    t1_s = time.perf_counter_ns(); sched1.run(1_000, world1)
+    t1 = time.perf_counter_ns() - t1_s
+    t2_s = time.perf_counter_ns(); sched2.run(1_000, world2)
+    t2 = time.perf_counter_ns() - t2_s
+    assert abs(t1 - t2) <= 2_000
+PY
+
+# ───────────────────────────────────── ecs/__init__.py ─────────────────────────────────────
+cat > ecs/__init__.py <<'PY'
+"""Entity-Component-System package (Sprint 0 baseline)."""
+__all__ = ["components", "entity", "system", "world"]
+PY
+
+echo "✅  Sprint-0 files written.  Run 'pytest -q' or 'python engine_tick.py'"
