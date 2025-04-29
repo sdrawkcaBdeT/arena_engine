@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arena-engine-core"
+version = "0.1.0.dev0"
+description = "Sprint-0 deterministic tick loop & ECS plumbing for THE ARENA"
+authors = [{ name = "Your Name" }]
+requires-python = ">=3.12"
